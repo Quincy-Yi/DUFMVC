@@ -1,16 +1,14 @@
-import os
 import pdb
-import time
 import torch
-import openpyxl
 import numpy as np
 import scipy.io as sio
 import scipy.sparse as sp
 from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import minmax_scale, maxabs_scale, normalize, robust_scale, scale
-from functools import reduce
-import h5py
-from utils_impute import impute_sample_view_missing_knn
+from sklearn.preprocessing import normalize
+from utils_impute import (
+    impute_sample_view_missing_knn,
+    impute_sample_view_missing_mean,
+)
 
 def load_Caltech_7(direct_path, dataset_name):
     target_path = direct_path + '/' + dataset_name + '.mat'
@@ -216,6 +214,11 @@ def generate_data(
     use_view_impute=False,
     impute_k=None,
     ref_mode="concat",
+    return_impute_context=False,
+    proxy_initialization="knn",
+    proxy_temperature=1.0,
+    proxy_coverage_threshold=0.8,
+    missing_seed=1018,
 ):
     print('load_data')
     if dataset_name == 'Caltech101-7':
@@ -256,7 +259,13 @@ def generate_data(
             complete_indices,
             mask_view_list,
             X_full_zero_list,
-        ) = form_incomplete_data(miss_rates, feature_list, labels, return_full=True)
+        ) = form_incomplete_data(
+            miss_rates,
+            feature_list,
+            labels,
+            return_full=True,
+            seed=missing_seed,
+        )
     else:
         (
             X_incomplete,
@@ -265,7 +274,13 @@ def generate_data(
             Y_complete,
             incomplete_indices,
             complete_indices,
-        ) = form_incomplete_data(miss_rates, feature_list, labels, return_full=False)
+        ) = form_incomplete_data(
+            miss_rates,
+            feature_list,
+            labels,
+            return_full=False,
+            seed=missing_seed,
+        )
         mask_view_list = None
         X_full_zero_list = None
 
@@ -274,15 +289,45 @@ def generate_data(
     adj_full_list = None
     adj_full_label_list = None
     M_full_list = None
+    imputation_context = None
+    if proxy_initialization not in {"knn", "mean"}:
+        raise ValueError("proxy_initialization must be either 'knn' or 'mean'.")
+
     if use_view_impute:
         if impute_k is None:
             impute_k = knn_neighbor
-        X_full_imputed_list = impute_sample_view_missing_knn(
-            X_full_zero_list,
-            mask_view_list,
-            k=int(impute_k),
-            ref_mode=ref_mode,
-        )
+        if proxy_initialization == "mean":
+            # The Full method still needs the original proxy candidate sets to
+            # measure recovery-induced U_d.  They are computed for measurement
+            # only; the actual representation initializer is the observed-view
+            # mean in this structural ablation.
+            if return_impute_context:
+                _, imputation_context = impute_sample_view_missing_knn(
+                    X_full_zero_list,
+                    mask_view_list,
+                    k=int(impute_k),
+                    ref_mode=ref_mode,
+                    tau=float(proxy_temperature),
+                    coverage_threshold=float(proxy_coverage_threshold),
+                    return_context=True,
+                )
+            X_full_imputed_list = impute_sample_view_missing_mean(
+                X_full_zero_list, mask_view_list
+            )
+        else:
+            imputation_result = impute_sample_view_missing_knn(
+                X_full_zero_list,
+                mask_view_list,
+                k=int(impute_k),
+                ref_mode=ref_mode,
+                tau=float(proxy_temperature),
+                coverage_threshold=float(proxy_coverage_threshold),
+                return_context=return_impute_context,
+            )
+            if return_impute_context:
+                X_full_imputed_list, imputation_context = imputation_result
+            else:
+                X_full_imputed_list = imputation_result
         X_incomplete_imputed_list = []
         for v in range(len(feature_list)):
             present_idx = incomplete_indices[v]
@@ -341,7 +386,7 @@ def generate_data(
         M_c_list,
     )
     if use_view_impute:
-        return base + (
+        imputed_output = base + (
             X_full_imputed_list,
             mask_view_list,
             X_incomplete_imputed_list,
@@ -350,6 +395,9 @@ def generate_data(
             adj_full_label_list,
             M_full_list,
         )
+        if return_impute_context:
+            return imputed_output + (imputation_context,)
+        return imputed_output
     return base
 
 def construct_adjacency_matrix(features, k_nearest_neighobrs, prunning_one, prunning_two, common_neighbors, new_index):
@@ -451,8 +499,8 @@ def get_M(adj):
     M_numpy = sum([np.linalg.matrix_power(tran_prob, i) for i in range(1, t + 1)]) / t
     return torch.Tensor(M_numpy)
 
-def form_incomplete_data(miss_rates, X, Y, return_full=False):
-    np.random.seed(0)
+def form_incomplete_data(miss_rates, X, Y, return_full=False, seed=1018):
+    rng = np.random.default_rng(seed)
     size = len(Y)
     view_num = len(X)
     missdata_indices = []
@@ -462,7 +510,7 @@ def form_incomplete_data(miss_rates, X, Y, return_full=False):
     for i in range(view_num):
         if (i != view_num-1):
             missing_size = int(miss_rates[i] * size)
-            missing_indices = np.random.choice(indices, size=missing_size, replace=False)
+            missing_indices = rng.choice(indices, size=missing_size, replace=False)
             missdata_indices.append(missing_indices)
             incomplete_indices.append(np.setdiff1d(indices, missing_indices))
             complete_indices = np.setdiff1d(complete_indices, missing_indices)
@@ -472,7 +520,7 @@ def form_incomplete_data(miss_rates, X, Y, return_full=False):
             for j in range(1, len(missdata_indices)):
                 missdata = np.intersect1d(missdata, missdata_indices[j])
             remind_indices = np.setdiff1d(indices, missdata)
-            missing_indices = np.random.choice(remind_indices, size=missing_size, replace=False)
+            missing_indices = rng.choice(remind_indices, size=missing_size, replace=False)
             incomplete_indices.append(np.setdiff1d(indices, missing_indices))
             complete_indices = np.setdiff1d(complete_indices, missing_indices)
 

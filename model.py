@@ -7,6 +7,20 @@ from layer import GATLayer
 from layer import GraphConvolution
 from layer import GraphConvSparse
 
+
+def sharpen_cluster_assignments(q, power=1.0, eps=1e-12):
+    """Sharpen probabilities without changing the winning cluster."""
+    power = float(power)
+    if power < 1.0:
+        raise ValueError("assignment power must be at least 1.")
+    if power == 1.0:
+        return q
+    sharpened = torch.clamp(q, min=eps).pow(power)
+    return sharpened / torch.clamp(
+        sharpened.sum(dim=1, keepdim=True), min=eps
+    )
+
+
 # gat
 class GAT(nn.Module):
     def __init__(self, num_features, hidden_size, embedding_size, alpha):
@@ -40,6 +54,7 @@ class DAEGC(nn.Module):
         # cluster layer
         self.cluster_layer = Parameter(torch.Tensor(args.n_clusters, args.embedding_size_gat))
         torch.nn.init.xavier_normal_(self.cluster_layer.data)
+        self.assignment_power = 1.0
 
     def forward(self, x, adj, M):
         A_pred, z = self.gat(x, adj, M)
@@ -51,7 +66,7 @@ class DAEGC(nn.Module):
         q = 1.0 / (1.0 + torch.sum(torch.pow(z.unsqueeze(1) - self.cluster_layer, 2), 2) / self.v)
         q = q.pow((self.v + 1.0) / 2.0)
         q = (q.t() / torch.sum(q, 1)).t()
-        return q
+        return sharpen_cluster_assignments(q, self.assignment_power)
 
 
 # gcn
@@ -88,6 +103,7 @@ class GCNED(nn.Module):
         # cluster layer
         self.cluster_layer = Parameter(torch.Tensor(args.n_clusters, args.embedding_size_gcn))
         torch.nn.init.xavier_normal_(self.cluster_layer.data)
+        self.assignment_power = 1.0
 
     def forward(self, x, adj):
         A_pred, z = self.gcn(x, adj)
@@ -99,7 +115,7 @@ class GCNED(nn.Module):
         q = 1.0 / (1.0 + torch.sum(torch.pow(z.unsqueeze(1) - self.cluster_layer, 2), 2) / self.v)
         q = q.pow((self.v + 1.0) / 2.0)
         q = (q.t() / torch.sum(q, 1)).t()
-        return q
+        return sharpen_cluster_assignments(q, self.assignment_power)
 
 
 

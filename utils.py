@@ -37,58 +37,6 @@ def get_weights(center,view):
 
     return weights
 
-def get_weights_from_U(U_list, feature_missing_masks, alpha=1.0, lam=1.0, eps=1e-8):
-    """
-    U_list: List[np.ndarray], each of shape [N_complete, K]
-    feature_missing_masks: List[np.ndarray|None], missing indicator or missing ratio tensor
-    return: np.ndarray of shape [view_num], normalized weights
-    """
-    if len(U_list) != len(feature_missing_masks):
-        raise ValueError("U_list and feature_missing_masks must have the same length.")
-
-    weights = []
-    for U, mask in zip(U_list, feature_missing_masks):
-        U = np.asarray(U, dtype=float)
-        if U.ndim != 2:
-            raise ValueError("Each U must be a 2D array with shape [N, K].")
-
-        N, K = U.shape
-        if N == 0 or K == 0:
-            weights.append(eps)
-            continue
-
-        U = np.clip(U, eps, 1.0)
-        row_sum = np.sum(U, axis=1, keepdims=True)
-        U = U / (row_sum + eps)
-
-        if mask is None:
-            rho_bar = 0.0
-        else:
-            mask_arr = np.asarray(mask, dtype=float)
-            if mask_arr.size == 0:
-                rho_bar = 0.0
-            else:
-                rho_bar = float(np.mean(mask_arr))
-        rho_bar = float(np.clip(rho_bar, 0.0, 1.0))
-
-        log_k = np.log(float(K) + eps)
-        ent = -np.sum(U * np.log(U + eps), axis=1) / log_k
-        H_bar = float(np.mean(ent)) if ent.size else 0.0
-
-        conf = np.max(U, axis=1)
-        sigma = float(np.var(conf))
-
-        denom = (rho_bar ** alpha) + (lam * H_bar) + eps
-        s = np.log1p(sigma) / denom
-
-        w_prime = 1.0 - np.exp(-s)
-        weights.append(w_prime)
-
-    weights = np.asarray(weights, dtype=float)
-    weights = np.clip(weights, eps, None)
-    weights = weights / np.sum(weights)
-    return weights
-
 def update_A(y_true, y_pred):
     y_true = y_true.astype(np.int64)
     y_pred = y_pred.astype(np.int64)
